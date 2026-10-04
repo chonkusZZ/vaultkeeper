@@ -1,0 +1,36 @@
+# Example: manager + one destination agent + one source agent.
+#   VK_ADMIN_PASSWORD=changeme VK_TOKEN=$(openssl rand -hex 16) docker compose up -d --build
+# then open http://localhost:${VK_PORT:-8080}
+x-agent-env: &agent-env
+  VK_MANAGER: http://manager:8080
+  VK_TOKEN: ${VK_TOKEN:?set VK_TOKEN to any random string}
+
+services:
+  manager:
+    build: { context: ., target: manager }
+    ports: ["${VK_PORT:-8080}:8080"]
+    environment:
+      VK_ADMIN_PASSWORD: ${VK_ADMIN_PASSWORD:?set VK_ADMIN_PASSWORD}
+      VK_ENROLL_TOKEN: ${VK_TOKEN}
+    volumes: [manager-data:/data]
+    restart: unless-stopped
+
+  # Destination: stores repositories under /data/repos. Other agents reach it at https://dest:8765
+  dest:
+    build: { context: ., target: agent }
+    command: ["--name", "dest", "--roles", "dest", "--listen", ":8765", "--advertise", "https://dest:8765"]
+    environment: *agent-env
+    volumes: [dest-data:/data]
+    restart: unless-stopped
+
+  # Source: back up whatever you mount read-only under /source.
+  source:
+    build: { context: ., target: agent }
+    command: ["--name", "source", "--roles", "source"]
+    environment: *agent-env
+    volumes:
+      - source-data:/data
+      - source-files:/source
+    restart: unless-stopped
+
+volumes: { manager-data: {}, dest-data: {}, source-data: {}, source-files: {} }
