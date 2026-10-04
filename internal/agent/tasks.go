@@ -89,7 +89,7 @@ func (a *Agent) execute(parent context.Context, t proto.Task) {
 				res = proto.Result{Status: proto.StatusFailed, Message: fmt.Sprint("agent panic: ", r)}
 			}
 		}()
-		if a.bin == "" && t.Kind != proto.KindMirror && t.Kind != proto.KindPurge {
+		if a.bin == "" && t.Kind != proto.KindMirror && t.Kind != proto.KindPurge && t.Kind != proto.KindWake && t.Kind != proto.KindHook {
 			if err := a.ensureRestic(); err != nil {
 				res = proto.Result{Status: proto.StatusFailed, Message: err.Error()}
 				return
@@ -106,6 +106,10 @@ func (a *Agent) execute(parent context.Context, t proto.Task) {
 			res = a.doCopy(ctx, c, tmp)
 		case proto.KindSnapshots:
 			res = a.doSnapshots(ctx, c, tmp)
+		case proto.KindWake:
+			res = a.doWake(ctx, c, tmp)
+		case proto.KindHook:
+			res = a.doHook(ctx, c, tmp)
 		case proto.KindMirror:
 			res = a.doMirror(ctx, c, tmp)
 		case proto.KindForget:

@@ -101,7 +101,7 @@ const nameOf = (list, id) => (list.find((x) => x.id === id) || {}).name || '?';
 function modal(title, content, buttons) {
   const bg = h('div', { class: 'modal-bg', onclick: (e) => { if (e.target === bg) bg.remove(); } });
   const close = () => bg.remove();
-  bg.append(h('div', { class: 'modal', role: 'dialog', 'aria-label': title },
+  bg.append(h('div', { class: 'modal' + (content.classList && content.classList.contains('wide') ? ' wide' : ''), role: 'dialog', 'aria-label': title },
     h('h2', {}, title), content,
     h('div', { class: 'actions', style: 'margin-top:16px;justify-content:flex-end' },
       (buttons || []).map((b) => h('button', { class: 'btn ' + (b.cls || ''), onclick: () => b.fn(close) }, b.label)),
@@ -283,6 +283,97 @@ function logRow(l) {
     h('span', { class: 'm' }, l.job_name ? h('b', {}, l.job_name + ': ') : null, l.run_id ? h('a', { href: '#/runs/' + l.run_id }, l.message) : l.message));
 }
 
+/* ---------- wake target & post-completion script ---------- */
+function hooksFieldset(initial, { defaultAgent }) {
+  const agents = state.agents.map((x) => x.agent);
+  const w = (initial && initial.wake) || {}, po = (initial && initial.post) || {};
+  const agentSel = (val) => select(agents.map((a) => [a.id, a.name]), val || defaultAgent || (agents[0] || {}).id);
+  const scriptsOff = (id) => { const a = agents.find((x) => x.id === id); return a && !a.allow_scripts; };
+
+  const f = {
+    wakeOn: h('input', { type: 'checkbox', checked: !!w.enabled }),
+    wakeAgent: agentSel(w.agent),
+    method: select([['wol', 'Wake-on-LAN (magic packet)'], ['command', 'Custom command']], w.method || 'wol'),
+    mac: h('input', { type: 'text', value: w.mac || '', placeholder: 'aa:bb:cc:dd:ee:ff' }),
+    bcast: h('input', { type: 'text', value: w.broadcast || '', placeholder: 'optional, e.g. 192.168.1.255' }),
+    cmd: h('textarea', { placeholder: 'curl -s http://smartplug.lan/relay/0?turn=on', value: w.command || '' }),
+    ready: select([['browse', 'It is browseable — a folder on the agent lists (recommended)'], ['ping', 'It answers ping'], ['tcp', 'A TCP port is open (e.g. 445 SMB, 2049 NFS, 22 SSH)'], ['command', 'A command succeeds']], w.ready || 'browse'),
+    path: h('input', { type: 'text', value: w.path || '', placeholder: '/mnt/nas/backups' }),
+    marker: h('input', { type: 'text', value: w.marker || '', placeholder: 'optional, e.g. .vk-ready' }),
+    tryMount: h('input', { type: 'checkbox', checked: !!w.try_mount }),
+    host: h('input', { type: 'text', value: w.host || '', placeholder: 'nas.lan or 192.168.1.20' }),
+    port: h('input', { type: 'number', min: 1, max: 65535, value: w.port || 445 }),
+    rcmd: h('textarea', { placeholder: 'test -d /mnt/nas/backups', value: w.ready_command || '' }),
+    settle: h('input', { type: 'number', min: 0, max: 3600, value: w.settle_sec || 0 }),
+    timeout: h('input', { type: 'number', min: 1, max: 240, value: w.timeout_min || 10 }),
+    postOn: h('input', { type: 'checkbox', checked: !!po.enabled }),
+    postAgent: agentSel(po.agent || w.agent),
+    when: select([['success', 'After a successful run (warnings count as success)'], ['always', 'After every run, even failed ones']], po.on || 'success'),
+    ptimeout: h('input', { type: 'number', min: 5, max: 3600, value: po.timeout_sec || 120 }),
+    script: h('textarea', { style: 'min-height:110px', placeholder: '# example: power the NAS off over SSH\nssh -o BatchMode=yes admin@nas.lan poweroff', value: po.script || '' }),
+    target: h('input', { type: 'text', value: (initial && initial.target) || '', placeholder: 'optional, e.g. Main NAS' }),
+  };
+  const wakeBox = h('div', { style: 'margin-top:12px' }), postBox = h('div', { style: 'margin-top:12px' });
+  const scriptWarn = h('div', { class: 'note warn hidden' });
+  const draw = () => {
+    wakeBox.classList.toggle('hidden', !f.wakeOn.checked);
+    postBox.classList.toggle('hidden', !f.postOn.checked);
+    const m = f.method.value, r = f.ready.value;
+    put(wakeBox,
+      h('div', { class: 'row' }, field('Send the wake-up from agent', f.wakeAgent, 'It must be online and on the same network segment as the target (Docker bridge networking blocks broadcasts).'), field('How to wake it', f.method)),
+      m === 'wol' ? h('div', { class: 'row' }, field('MAC address of the target', f.mac, 'Wake-on-LAN must be enabled on the target.'), field('Broadcast address', f.bcast, 'Leave empty to broadcast on every network interface.')) : field('Wake command', f.cmd, 'Runs on that agent (e.g. a smart-plug or IPMI call).'),
+      h('div', { class: 'row' }, field('Start the job when…', f.ready, 'If the target already responds nothing is sent and the job starts immediately.')),
+      r === 'browse' ? h('div', { class: 'row' }, field('Folder that must list', f.path, 'Absolute path on that agent, e.g. where the NAS share is mounted. An empty, unmounted folder does not count.'), field('Marker file', f.marker, 'Optionally require this file inside the folder.'),
+        h('label', { class: 'check', style: 'align-self:end;margin-bottom:8px' }, f.tryMount, 'Try mounting it while waiting (needs an /etc/fstab entry)')) : null,
+      r === 'ping' ? h('div', { class: 'row' }, field('Host to ping', f.host)) : null,
+      r === 'tcp' ? h('div', { class: 'row' }, field('Host', f.host), field('Port', f.port)) : null,
+      r === 'command' ? h('div', { class: 'row' }, field('Readiness command', f.rcmd, 'Exit status 0 means ready. Runs on that agent.')) : null,
+      h('div', { class: 'row' }, field('…then wait this many extra seconds', f.settle, 'Usually 0 — the checks above already wait for the real thing.'), field('Give up after (minutes)', f.timeout, 'A safety net only; the job fails with a clear message if the target never comes up.')));
+    put(postBox,
+      h('div', { class: 'row' }, field('Run on agent', f.postAgent), field('Run', f.when), field('Script timeout (seconds)', f.ptimeout)),
+      field('Script', f.script, 'Runs with /bin/sh (Linux/macOS) or PowerShell (Windows). Variables: VK_JOB_NAME, VK_RUN_KIND, VK_STATUS, VK_MESSAGE, VK_TARGET, VK_RUN_ID. Output is added to the run log. Skipped while another job that shares this target is still running or queued.'));
+    const needs = [];
+    if (f.wakeOn.checked && (f.method.value === 'command' || f.ready.value === 'command') && scriptsOff(f.wakeAgent.value)) needs.push(agents.find((a) => a.id === f.wakeAgent.value).name);
+    if (f.postOn.checked && scriptsOff(f.postAgent.value)) needs.push(agents.find((a) => a.id === f.postAgent.value).name);
+    scriptWarn.classList.toggle('hidden', !needs.length);
+    scriptWarn.textContent = needs.length ? `Scripts are switched off on ${[...new Set(needs)].join(', ')}. Restart that agent with --allow-scripts (or VK_ALLOW_SCRIPTS=1) first — it's a deliberate opt-in because a script gives the manager command execution on that machine. It can't be enabled remotely.` : '';
+  };
+  Object.values(f).forEach((e) => e.addEventListener && e.addEventListener('input', draw));
+  draw();
+  const el = h('fieldset', {}, h('legend', {}, 'Wake target & post-completion script'),
+    h('div', { class: 'note' }, 'For a target that sleeps or is switched off (a NAS, a backup PC): wake it before the job and shut it down afterwards. Applies to every task that needs the target (backups, tests, restores…).'),
+    h('label', { class: 'check' }, f.wakeOn, 'Wake the backup target before running'), wakeBox,
+    h('label', { class: 'check', style: 'margin-top:16px' }, f.postOn, 'Run a script when the job has finished (e.g. shut the NAS down)'), postBox,
+    scriptWarn,
+    h('div', { class: 'row', style: 'margin-top:12px' }, field('Target name', f.target, 'Optional. Jobs using the same MAC/host — or the same name — share a target, so the script only runs once the last of them has finished.')));
+  const num = (e, d) => { const n = +e.value; return Number.isFinite(n) ? n : d; };
+  return { el, get: () => {
+    if (!f.wakeOn.checked && !f.postOn.checked) return null;
+    return { target: f.target.value.trim(),
+      wake: f.wakeOn.checked ? { enabled: true, agent: f.wakeAgent.value, method: f.method.value, mac: f.mac.value, broadcast: f.bcast.value, command: f.cmd.value, ready: f.ready.value,
+        host: f.host.value.trim(), port: num(f.port, 0), path: f.path.value.trim(), marker: f.marker.value.trim(), try_mount: f.tryMount.checked, ready_command: f.rcmd.value,
+        settle_sec: num(f.settle, 0), timeout_min: num(f.timeout, 10) } : { enabled: false },
+      post: f.postOn.checked ? { enabled: true, agent: f.postAgent.value, script: f.script.value, on: f.when.value, timeout_sec: num(f.ptimeout, 120) } : { enabled: false } };
+  } };
+}
+
+// Read-only summary rows for detail pages.
+function hooksRows(hk) {
+  if (!hk || !((hk.wake && hk.wake.enabled) || (hk.post && hk.post.enabled))) return null;
+  const rows = [];
+  const ag = (id) => (state.agents.map((x) => x.agent).find((a) => a.id === id) || {}).name || '?';
+  if (hk.wake && hk.wake.enabled) {
+    const w = hk.wake;
+    const ready = { browse: `${w.path} lists${w.marker ? ' (marker ' + w.marker + ')' : ''}`, ping: `${w.host} answers ping`, tcp: `${w.host}:${w.port} is open`, command: 'readiness command succeeds' }[w.ready] || w.ready;
+    rows.push(h('dt', {}, 'Wake target'), h('dd', {}, `${w.method === 'wol' ? 'Wake-on-LAN ' + w.mac : 'custom command'} from ${ag(w.agent)}; starts when ${ready}`, w.settle_sec ? `, +${w.settle_sec}s` : '', h('span', { class: 'muted' }, ` · gives up after ${w.timeout_min} min`)));
+  }
+  if (hk.post && hk.post.enabled) {
+    rows.push(h('dt', {}, 'After completion'), h('dd', {}, `Script on ${ag(hk.post.agent)} (${hk.post.on === 'always' ? 'after every run' : 'after success'})`, h('pre', { class: 'mono', style: 'margin:6px 0 0;white-space:pre-wrap' }, hk.post.script)));
+  }
+  if (hk.target) rows.push(h('dt', {}, 'Target name'), h('dd', {}, hk.target));
+  return rows;
+}
+
 /* ---------- jobs ---------- */
 async function pageJobs(c, p, token) {
   if (p[0] === 'new') return jobForm(c, null);
@@ -338,6 +429,7 @@ function overview(body, j) {
       h('dt', {}, 'Restore points kept'), h('dd', {}, j.keep_last ? `Last ${j.keep_last}` : 'Unlimited'),
       h('dt', {}, 'Compression'), h('dd', {}, j.compression),
       h('dt', {}, 'Bandwidth limit'), h('dd', {}, j.bandwidth_kb ? j.bandwidth_kb + ' KB/s' : 'None'),
+      hooksRows(j.hooks),
       h('dt', {}, 'Repository size'), h('dd', {}, j.repo_size ? fmtBytes(j.repo_size) : '—'),
       h('dt', {}, 'Encryption'), h('dd', {}, 'AES-256 (restic) ', h('button', { class: 'btn sm', onclick: guard(async () => showKey(await api(`/jobs/${j.id}/key`), j.name)) }, 'Show key')))),
     h('div', {},
@@ -453,6 +545,7 @@ function jobForm(c, job) {
   };
   const sched = schedulePicker(j.schedule);
   const tsched = schedulePicker(j.test_schedule, { allowManual: false });
+  const hk = hooksFieldset(j.hooks, { defaultAgent: j.dest_agent || f.dst.value });
   const mountBox = h('div', { class: 'row' });
   const tpathWrap = field('Test file path', f.tpath, 'Absolute path as it appears on the source. It must exist in the backup.');
   const tinfo = h('div', { class: 'note' }, j.test_path ? ['Current random test file: ', h('code', {}, j.test_path)] : 'A random non-empty file will be picked automatically after the first backup completes.');
@@ -470,7 +563,7 @@ function jobForm(c, job) {
       name: f.name.value, enabled: f.enabled.checked, source_agent: f.src.value, dest_agent: f.dst.value,
       paths: lines(f.paths.value), excludes: lines(f.excludes.value), schedule: sched.get(), keep_last: +f.keep.value || 0,
       compression: f.comp.value, bandwidth_kb: +f.bw.value || 0, test_mode: f.tmode.value, test_path: f.tpath.value,
-      test_schedule: tsched.get(), check_data_pct: +f.pct.value || 0, repo_password: f.pw.value,
+      test_schedule: tsched.get(), check_data_pct: +f.pct.value || 0, repo_password: f.pw.value, hooks: hk.get(),
       mount: f.mtype.value ? { type: f.mtype.value, remote: f.mremote.value, username: f.muser.value, password: f.mpass.value, domain: f.mdomain.value, options: f.mopts.value } : null,
     };
     try {
@@ -497,6 +590,7 @@ function jobForm(c, job) {
       h('fieldset', {}, h('legend', {}, 'Automatic backup test'), h('div', { class: 'row' }, field('Test file', f.tmode, 'Each test restores this file from the latest restore point and verifies it, then checks the repository chain.'),
         field('Test schedule', tsched.el)), tinfo, tpathWrap,
         h('div', { class: 'row' }, field('Also verify % of stored data', f.pct, 'Reads and verifies this share of pack data each test (0 = index/structure only; higher is slower).'))),
+      hk.el,
       editing ? null : h('fieldset', {}, h('legend', {}, 'Encryption'), h('div', { class: 'row' }, field('Repository password (optional)', f.pw, 'Backups are always encrypted. You can view the key later from the job page.'))),
       h('div', { class: 'actions' }, h('button', { class: 'btn primary', disabled: noAgents }, 'Save job'), h('a', { class: 'btn', href: editing ? '#/jobs/' + j.id : '#/jobs' }, 'Cancel'),
         editing ? h('button', { type: 'button', class: 'btn danger right', onclick: () => deleteDialog({ title: 'Delete backup job', name: j.name, kindLabel: 'backup job', dataLabel: 'all of its backups (restore points)', destName: j.dest_name, base: '/jobs/' + j.id, back: '#/jobs' }) }, 'Delete job') : null)));
@@ -581,6 +675,7 @@ async function mirrorDetail(c, id, token) {
           h('dt', {}, 'Deletions'), h('dd', {}, m.propagate_deletes ? `Propagated${m.max_delete_pct ? `, blocked if more than ${m.max_delete_pct}% of the destination would go` : ''}` : 'Not propagated (extra files are kept)'),
           h('dt', {}, 'Ownership'), h('dd', {}, m.preserve_owner ? `Preserved (by ${m.owner_map === 'names' ? 'name' : 'numeric ID'})` : 'Not preserved'),
           h('dt', {}, 'ACLs & attributes'), h('dd', {}, m.preserve_acls ? 'Preserved' : 'Not preserved'),
+          hooksRows(m.hooks),
           h('dt', {}, 'Parallel transfers'), h('dd', {}, String(m.workers)),
           h('dt', {}, 'Bandwidth limit'), h('dd', {}, m.bandwidth_kb ? m.bandwidth_kb + ' KB/s' : 'None'))),
         h('div', { class: 'card' }, h('h2', {}, 'Last sync'), lr ? [
@@ -632,6 +727,7 @@ function mirrorForm(c, m) {
     acl: h('input', { type: 'checkbox', checked: j.preserve_acls }),
   };
   const sched = schedulePicker(j.schedule);
+  const hk = hooksFieldset(j.hooks, { defaultAgent: j.dest_agent || f.dst.value });
   const mountBox = h('div', { class: 'row' });
   const where = h('div', { class: 'hint small muted', style: 'margin-top:4px;font-weight:400' });
   const sync = () => {
@@ -648,7 +744,7 @@ function mirrorForm(c, m) {
       name: f.name.value, enabled: f.enabled.checked, source_agent: f.src.value, source_path: f.spath.value, dest_agent: f.dst.value, dest_path: f.dpath.value,
       excludes: lines(f.excludes.value), schedule: sched.get(), compare: f.compare.value, workers: +f.workers.value || 4, bandwidth_kb: +f.bw.value || 0,
       propagate_deletes: f.del.checked, max_delete_pct: +f.pct.value || 0,
-      preserve_owner: f.own.checked, owner_map: f.ownmap.value, preserve_acls: f.acl.checked,
+      preserve_owner: f.own.checked, owner_map: f.ownmap.value, preserve_acls: f.acl.checked, hooks: hk.get(),
       mount: f.mtype.value ? { type: f.mtype.value, remote: f.mremote.value, username: f.muser.value, password: f.mpass.value, domain: f.mdomain.value, options: f.mopts.value } : null,
     };
     try {
@@ -675,6 +771,7 @@ function mirrorForm(c, m) {
         h('div', { class: 'row' }, h('div', {}, h('label', { class: 'check' }, f.own, 'Preserve file owner and group'), h('div', { class: 'hint small muted', style: 'margin:4px 0 0 24px;font-weight:400' }, 'Also keeps setuid/setgid/sticky bits.')), field('Match users and groups by', f.ownmap, 'Names are looked up on the destination machine; unknown names fall back to the numeric ID.')),
         h('div', { class: 'row' }, h('div', {}, h('label', { class: 'check' }, f.acl, 'Preserve ACLs and extended attributes'), h('div', { class: 'hint small muted', style: 'margin:4px 0 0 24px;font-weight:400' }, 'Linux: POSIX ACLs (incl. default ACLs), file capabilities and user.* attributes. macOS: extended attributes only. ACL entries are copied verbatim, so their numeric IDs must mean the same on both machines.'))),
         h('div', { class: 'note warn' }, 'Setting ownership requires the destination agent to run as root (e.g. a systemd service as root); without it files are still copied and the run finishes with a warning. Not supported on Windows. Ownership/ACL changes alone are detected and applied without re-copying file data (this makes the comparison scan slightly slower).')),
+      hk.el,
       h('fieldset', {}, h('legend', {}, 'Deletions'), h('div', { class: 'row' }, h('div', { style: 'align-self:center' }, h('label', { class: 'check' }, f.del, 'Delete files on the destination that no longer exist on the source')),
         field('Safety limit (% of destination)', f.pct, 'Refuse to delete if more than this share would go (0 = no limit). An empty or unreadable source is always refused. Protects against an unmounted source wiping the mirror.')),
         h('div', { class: 'note warn' }, 'Deleted files are removed permanently from the destination — there are no restore points. Use Preview to see what a run would do before enabling a schedule.')),
@@ -719,14 +816,16 @@ function copyModal(x, jobs, done) {
   };
   if (x) { f.job.disabled = true; f.dst.disabled = true; }
   const sched = schedulePicker(x ? x.schedule : '30 3 * * *');
+  const hk = hooksFieldset(x && x.hooks, { defaultAgent: x ? x.dest_agent : f.dst.value });
   const err = h('div', { class: 'note bad hidden' });
   const body = h('div', {}, err,
     h('div', { class: 'row', style: 'display:grid;gap:14px' }, field('Name', f.name), field('Backup job to copy', f.job), field('Copy to destination', f.dst, 'Choose a different destination from the primary for real redundancy.'),
       field('Schedule', sched.el), field('Maximum restore points', f.keep, '0 = keep everything'),
-      h('label', { class: 'check' }, f.enabled, 'Enabled')));
+      h('label', { class: 'check' }, f.enabled, 'Enabled')), hk.el);
+  body.classList.add('wide');
   modal(x ? 'Edit copy job' : 'New copy job', body, [{ label: 'Save', cls: 'primary', fn: async (close) => {
     try {
-      const b = { name: f.name.value, enabled: f.enabled.checked, job_id: f.job.value, dest_agent: f.dst.value, schedule: sched.get(), keep_last: +f.keep.value || 0 };
+      const b = { name: f.name.value, enabled: f.enabled.checked, job_id: f.job.value, dest_agent: f.dst.value, schedule: sched.get(), keep_last: +f.keep.value || 0, hooks: hk.get() };
       if (x) await api('/copyjobs/' + x.id, 'PUT', b); else await api('/copyjobs', 'POST', b);
       close(); toast('Copy job saved'); done();
     } catch (e) { err.textContent = e.message; err.classList.remove('hidden'); }
@@ -780,6 +879,7 @@ function agentCard(x) {
         h('dt', {}, 'Agent / restic'), h('dd', {}, `v${a.version} · restic ${a.restic_version || 'not installed'}`),
         a.advertise ? [h('dt', {}, 'Data endpoint'), h('dd', {}, h('code', {}, a.advertise))] : null,
         h('dt', {}, 'Data directory'), h('dd', {}, h('code', {}, a.data_dir || '—')),
+        h('dt', {}, 'Scripts'), h('dd', {}, a.allow_scripts ? 'Allowed (--allow-scripts)' : h('span', { class: 'muted' }, 'Disabled — needed for wake commands and post-job scripts')),
         a.roles && a.roles.includes('dest') ? [h('dt', {}, 'Listens on'), h('dd', {}, h('code', {}, a.listen || '—'))] : null,
         h('dt', {}, 'Roles in use'), h('dd', {}, `${x.source_jobs} backup source job${x.source_jobs === 1 ? '' : 's'} · ${x.dest_repos} stored repositor${x.dest_repos === 1 ? 'y' : 'ies'}`)),
       h('div', {},
@@ -872,6 +972,7 @@ async function pageRun(c, p, token) {
       h('div', { class: 'page-head' }, h('h1', {}, `${r.kind[0].toUpperCase() + r.kind.slice(1)}${r.copy_name ? ' — ' + r.copy_name : ''}`), chip(r.status),
         live ? h('button', { class: 'btn danger right', onclick: guard(async () => { await api(`/runs/${r.id}/cancel`, 'POST', {}); toast('Cancel requested'); }) }, 'Cancel run') : null),
       r.message ? h('div', { class: 'note ' + (r.status === 'failed' ? 'bad' : 'warn') }, r.message) : null,
+      r.status === 'queued' && r.wait_for ? h('div', { class: 'note' }, 'Waiting for the backup target to wake up — this run starts as soon as it is ready (see the log below).') : null,
       h('div', { class: 'card' }, h('dl', { class: 'kv' },
         h('dt', {}, 'Created'), h('dd', {}, fmtTime(r.created) + ' · ' + r.trigger),
         h('dt', {}, 'Agent'), h('dd', {}, r.agent_name),

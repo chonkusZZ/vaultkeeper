@@ -149,3 +149,5 @@ legend { padding: 0 6px; font-weight: 700; font-size: 13px; }
   .main { padding: 18px 14px 50px; }
   .kv { grid-template-columns: 1fr; }
 }
+
+.modal.wide { max-width: 760px; }

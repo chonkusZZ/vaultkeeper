@@ -109,7 +109,7 @@ func (s *Server) scheduledMirror(id string) {
 
 // enqueueMirror queues a mirror run (optionally a dry-run preview).
 func (s *Server) enqueueMirror(m *store.MirrorJob, trigger string, p proto.Explore) (*store.Run, error) {
-	o := enqueueOpts{kind: proto.KindMirror, job: &store.Job{ID: m.ID, Name: m.Name}, trigger: trigger, exec: m.SourceAgent, params: p}
+	o := enqueueOpts{kind: proto.KindMirror, job: &store.Job{ID: m.ID, Name: m.Name}, trigger: trigger, exec: m.SourceAgent, params: p, hooks: m.Hooks, hooksSet: true}
 	if m.DestAgent != m.SourceAgent {
 		o.need = []string{m.DestAgent}
 	}
@@ -168,15 +168,17 @@ func (s *Server) enqueue(kind string, job *store.Job, cp *store.CopyJob, trigger
 }
 
 type enqueueOpts struct {
-	id      string // optional preset run id
-	kind    string
-	job     *store.Job
-	cp      *store.CopyJob // copy job being run (copy) or repo being explored (explorer kinds)
-	trigger string
-	hidden  bool
-	exec    string   // agent that executes the task
-	need    []string // other agents that must be online
-	params  proto.Explore
+	id       string // optional preset run id
+	kind     string
+	job      *store.Job
+	cp       *store.CopyJob // copy job being run (copy) or repo being explored (explorer kinds)
+	trigger  string
+	hidden   bool
+	exec     string   // agent that executes the task
+	need     []string // other agents that must be online
+	params   proto.Explore
+	hooks    *store.Hooks // preset by mirror runs (whose job is a stand-in)
+	hooksSet bool
 }
 
 // Kinds that only read a repository and may overlap with each other.
@@ -215,8 +217,21 @@ func (s *Server) enqueueWith(o enqueueOpts) (*store.Run, error) {
 	if o.id == "" {
 		o.id = rid(8)
 	}
+	hooks := o.hooks
+	if !o.hooksSet {
+		switch {
+		case cp != nil:
+			hooks = cp.Hooks
+		default:
+			hooks = job.Hooks
+		}
+	}
+	needWake := wakeEnabled(hooks, kind)
 	run := &store.Run{ID: o.id, Kind: kind, JobID: job.ID, CopyID: copyID, AgentID: o.exec,
 		Status: proto.StatusQueued, Trigger: o.trigger, Created: time.Now().Unix(), Hidden: o.hidden, Params: o.params}
+	if needWake {
+		run.WaitFor = rid(8) // id of the wake step this run waits for
+	}
 	if err := s.st.InsertRun(run); err != nil {
 		return nil, err
 	}
@@ -225,7 +240,12 @@ func (s *Server) enqueueWith(o enqueueOpts) (*store.Run, error) {
 	}
 
 	var problem string
-	for i, id := range append([]string{o.exec}, o.need...) {
+	agentsToCheck := append([]string{o.exec}, o.need...)
+	if needWake {
+		// The target (and an agent running on it) may be asleep: only the agent that sends the wake must be up.
+		agentsToCheck = []string{hooks.Wake.Agent}
+	}
+	for i, id := range agentsToCheck {
 		a, err := s.agent(id)
 		if err != nil {
 			problem = "agent no longer exists"
@@ -248,6 +268,18 @@ func (s *Server) enqueueWith(o enqueueOpts) (*store.Run, error) {
 		if !o.hidden {
 			s.notifyRun(run, job, cp)
 		}
+		return run, nil
+	}
+	if needWake {
+		wakeRun := &store.Run{ID: run.WaitFor, Kind: proto.KindWake, AgentID: hooks.Wake.Agent, Status: proto.StatusQueued,
+			Trigger: "wake for " + kind, Created: time.Now().Unix(), Hidden: true, Parent: run.ID}
+		if err := s.st.InsertRun(wakeRun); err != nil {
+			return nil, err
+		}
+		if !o.hidden {
+			s.st.AddLog(store.LogEntry{Level: proto.LevelInfo, RunID: run.ID, JobID: job.ID, Source: "manager", Message: "waking the backup target before running"})
+		}
+		s.wake(hooks.Wake.Agent)
 		return run, nil
 	}
 	s.wake(o.exec)
@@ -308,6 +340,9 @@ func localRepo(dest *store.Agent, repoName, password string) proto.Repo {
 
 // buildTask turns a claimed run into a full task for the agent.
 func (s *Server) buildTask(run *store.Run) (*proto.Task, error) {
+	if run.Kind == proto.KindWake || run.Kind == proto.KindHook {
+		return s.buildHookTask(run)
+	}
 	if run.Kind == proto.KindMirror {
 		return s.buildMirrorTask(run)
 	}
@@ -429,6 +464,15 @@ func (s *Server) finishRun(run *store.Run, res proto.Result) {
 		s.st.AddLog(store.LogEntry{Level: lvl, RunID: run.ID, JobID: run.JobID, Source: "manager", Message: msg})
 	}
 
+	if run.Kind == proto.KindWake {
+		s.finishWake(run, status, res.Message)
+		return
+	}
+	if run.Kind == proto.KindHook {
+		s.finishHook(run, status, res.Message)
+		return
+	}
+	defer s.maybePostHook(run) // after any notification / chained work below has been queued
 	if run.Kind == proto.KindPurge {
 		name := run.Params.Name
 		if name == "" {
@@ -626,8 +670,14 @@ func (s *Server) reapRuns() {
 		var reason string
 		if r.Status == proto.StatusRunning && now-r.Activity > 600 {
 			reason = "lost contact with agent while running"
-		} else if r.Status == proto.StatusQueued && now-r.Created > 1800 {
-			reason = "agent did not pick up the task within 30 minutes"
+		} else if r.Status == proto.StatusQueued && r.WaitFor == "" {
+			ref := r.Created
+			if r.Activity > ref { // released from its wake step later than it was created
+				ref = r.Activity
+			}
+			if now-ref > 1800 {
+				reason = "agent did not pick up the task within 30 minutes"
+			}
 		}
 		if reason == "" {
 			continue
@@ -643,5 +693,6 @@ func (s *Server) reapRuns() {
 			}
 			s.notifyRun(r, job, cp)
 		}
+		s.maybePostHook(r)
 	}
 }

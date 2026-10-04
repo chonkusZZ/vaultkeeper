@@ -13,6 +13,8 @@ const (
 	KindCopy      = "copy"
 	KindSnapshots = "snapshots"
 	KindPrune     = "prune"   // apply the restore-point limit now
+	KindWake      = "wake"    // wake a backup target and wait until it is ready
+	KindHook      = "hook"    // run a post-completion script
 	KindForget    = "forget"  // delete one restore point
 	KindPurge     = "purge"   // delete stored data (a repository or a mirror folder)
 	KindMirror    = "mirror"  // raw file-for-file mirror (not a restic repository)
@@ -89,6 +91,7 @@ type Stats struct {
 	AdvertiseSetting string `json:"advertise_setting,omitempty"` // configured advertise URL ("" = auto)
 	MirrorTotal      uint64 `json:"mirror_total,omitempty"`
 	MirrorFree       uint64 `json:"mirror_free,omitempty"`
+	AllowScripts     bool   `json:"allow_scripts,omitempty"` // agent was started with --allow-scripts
 }
 
 // AgentConfig is configuration the manager can push to an agent. The agent
@@ -158,6 +161,31 @@ type MirrorDest struct {
 	Token   string `json:"token,omitempty"`
 }
 
+// WakeSpec describes how to wake a backup target (e.g. a NAS) and when it counts as ready.
+type WakeSpec struct {
+	Method    string `json:"method"`              // wol | command
+	MAC       string `json:"mac,omitempty"`       // wol: target MAC address
+	Broadcast string `json:"broadcast,omitempty"` // wol: broadcast address[:port] (default: all interfaces, port 9)
+	Command   string `json:"command,omitempty"`   // command: custom wake command (needs --allow-scripts)
+
+	Ready        string `json:"ready"`                   // browse | ping | tcp | command
+	Host         string `json:"host,omitempty"`          // ping, tcp
+	Port         int    `json:"port,omitempty"`          // tcp
+	Path         string `json:"path,omitempty"`          // browse: folder on the waking agent that must become listable
+	Marker       string `json:"marker,omitempty"`        // browse: file that must exist inside Path
+	TryMount     bool   `json:"try_mount,omitempty"`     // browse: run `mount <Path>` while waiting (needs an fstab entry)
+	ReadyCommand string `json:"ready_command,omitempty"` // command: exit status 0 means ready (needs --allow-scripts)
+	SettleSec    int    `json:"settle_sec,omitempty"`    // extra seconds to wait once ready
+	TimeoutMin   int    `json:"timeout_min"`             // give up after this long
+}
+
+// HookSpec is a script to run on an agent once a job has finished.
+type HookSpec struct {
+	Script     string            `json:"script"`
+	TimeoutSec int               `json:"timeout_sec"`
+	Env        map[string]string `json:"env,omitempty"`
+}
+
 // MirrorSpec is the configuration of one mirror run.
 type MirrorSpec struct {
 	SourcePath       string     `json:"source_path"`
@@ -199,6 +227,8 @@ type Task struct {
 
 	Explore *Explore    `json:"explore,omitempty"`
 	Mirror  *MirrorSpec `json:"mirror,omitempty"`
+	Wake    *WakeSpec   `json:"wake,omitempty"`
+	Hook    *HookSpec   `json:"hook,omitempty"`
 
 	// copy
 	From *Repo `json:"from,omitempty"` // source repo (local to executing agent)

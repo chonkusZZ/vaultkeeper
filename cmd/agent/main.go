@@ -35,6 +35,7 @@ func main() {
 	listen := fs.String("listen", env("VK_LISTEN", ":8765"), "destination data endpoint listen address")
 	advertise := fs.String("advertise", env("VK_ADVERTISE", ""), "URL source agents use to reach this destination (default: auto-detected https://ip:port)")
 	mirrorRoot := fs.String("mirror-root", env("VK_MIRROR_ROOT", ""), "destination: folder holding raw mirrors (default <data-dir>/mirrors); point this at your big disk or mounted share")
+	allowScripts := fs.Bool("allow-scripts", env("VK_ALLOW_SCRIPTS", "") != "", "let the manager run shell commands on this machine (wake commands, post-job scripts). Off by default; cannot be enabled remotely")
 	insecure := fs.Bool("insecure", env("VK_INSECURE", "") != "", "skip TLS verification of the manager (self-signed)")
 
 	args := os.Args[1:]
@@ -79,7 +80,7 @@ WantedBy=multi-user.target
 	defer stop()
 	cfg := agent.Config{
 		Manager: *manager, Token: *token, Name: *name, DataDir: *dataDir,
-		Listen: *listen, Advertise: *advertise, Insecure: *insecure, MirrorRoot: *mirrorRoot,
+		Listen: *listen, Advertise: *advertise, Insecure: *insecure, MirrorRoot: *mirrorRoot, AllowScripts: *allowScripts,
 	}
 	for _, r := range strings.Split(*roles, ",") {
 		if r = strings.TrimSpace(r); r == "source" || r == "dest" {

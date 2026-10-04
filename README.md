@@ -94,6 +94,36 @@ Everything also reads `VK_*` environment variables (see `--help`).
     Turning these on makes the comparison scan a little slower (extra metadata reads on both sides), so leave them off
     if you don't need them.
 
+## Waking a backup target and running a script afterwards
+
+Backup, copy and mirror jobs have an optional **Wake target & post-completion script** section — meant for a NAS or backup PC
+that sleeps or is switched off.
+
+* **Wake first.** The chosen agent sends Wake-on-LAN magic packets (or runs a custom command, e.g. a smart-plug call) and then
+  **waits for the target to actually be ready — no fixed timers**. "Ready" can be: *a folder on that agent lists* (your NAS
+  share is mounted and browseable — recommended; an empty, unmounted folder deliberately does **not** count, and you can add a
+  marker file or let it try `mount <folder>` from `/etc/fstab`), *answers ping*, *a TCP port is open* (445 SMB, 2049 NFS…),
+  or *a command succeeds*. An optional "wait N more seconds" exists for stubborn devices (default 0). If the target already
+  responds, nothing is sent and the job starts at once. A timeout (default 10 min) is only a safety net: if the target never comes
+  up the run **fails with a clear message and the backup never starts** (and you're alerted like any failed run).
+* **While it waits** the run is shown as queued, and the wake progress appears in the run's log. Cancelling the run stops the wake.
+  The agent that holds the backup data (or the NAS's own agent) may be offline while the target sleeps — only the agent that
+  sends the wake-up must be online.
+* **Then run the script.** After a run finishes (backup, copy, mirror, test, prune, restore) the post-script runs on the agent you
+  pick — after every success (warnings count) or after every run. Typical use: `ssh admin@nas poweroff`. Output goes into the
+  run log; the script gets `VK_JOB_NAME`, `VK_RUN_KIND`, `VK_STATUS`, `VK_MESSAGE`, `VK_TARGET`, `VK_RUN_ID`. A failing script
+  raises an alert but never changes the backup's result.
+* **Shared targets are protected.** Jobs on the same target (same MAC/host, or the same *Target name*) share it: the script runs
+  only after the **last** of them has finished, so a NAS isn't powered off under a job that still needs it. (Browsing the explorer
+  doesn't count as a job and doesn't trigger the script.)
+* **Scripts are an explicit, local opt-in.** Running arbitrary commands gives anyone who controls the manager (or a stolen admin
+  session) code execution on that machine, so an agent only runs wake commands, readiness commands or post-scripts if it was
+  started with `--allow-scripts` (or `VK_ALLOW_SCRIPTS=1`); the manager refuses to save such a job otherwise, and the flag cannot
+  be switched on from the UI. Plain Wake-on-LAN and the built-in readiness checks need no opt-in.
+* **Wake-on-LAN needs layer-2 reach:** the sending agent must be on the same network segment as the target, Wake-on-LAN must be
+  enabled in the target's firmware/OS, and for Docker use `network_mode: host` for that agent (bridge networks drop broadcasts).
+  One wake target per job: a copy job uses its own settings, not the primary job's.
+
 ## Managing everything from the web UI
 
 Day-to-day operation never needs a shell on the manager. What is covered, and the few things that are deliberately not:

@@ -36,6 +36,7 @@ type Agent struct {
 	Desired          *proto.AgentConfig `json:"desired,omitempty"` // pending remote configuration
 	LowDiskNotified  bool               `json:"low_disk_notified"`
 	MirrorTotal      uint64             `json:"mirror_total"`
+	AllowScripts     bool               `json:"allow_scripts"`
 	MirrorFree       uint64             `json:"mirror_free"`
 	LastSeen         int64              `json:"last_seen"`
 	Created          int64              `json:"created"`
@@ -55,6 +56,7 @@ func (a *Agent) Has(role string) bool {
 }
 
 type Job struct {
+	Hooks        *Hooks       `json:"hooks,omitempty"`
 	ID           string       `json:"id"`
 	Name         string       `json:"name"`
 	Enabled      bool         `json:"enabled"`
@@ -77,7 +79,30 @@ type Job struct {
 	Created      int64        `json:"created"`
 }
 
+// Hooks are optional steps around a job: wake the backup target first, run a
+// script afterwards.
+type Hooks struct {
+	Target string `json:"target,omitempty"` // optional label shared by jobs that use the same target
+	Wake   *Wake  `json:"wake,omitempty"`
+	Post   *Post  `json:"post,omitempty"`
+}
+
+type Wake struct {
+	Enabled bool   `json:"enabled"`
+	Agent   string `json:"agent"` // the agent that sends the wake-up and checks readiness
+	proto.WakeSpec
+}
+
+type Post struct {
+	Enabled    bool   `json:"enabled"`
+	Agent      string `json:"agent"` // the agent that runs the script
+	Script     string `json:"script"`
+	On         string `json:"on"` // success (incl. warnings) | always
+	TimeoutSec int    `json:"timeout_sec"`
+}
+
 type CopyJob struct {
+	Hooks        *Hooks `json:"hooks,omitempty"`
 	ID           string `json:"id"`
 	Name         string `json:"name"`
 	Enabled      bool   `json:"enabled"`
@@ -123,6 +148,7 @@ type Settings struct {
 // MirrorJob keeps a destination folder an exact file-for-file copy of a source
 // folder (deletions included), unlike restic jobs which keep restore points.
 type MirrorJob struct {
+	Hooks            *Hooks       `json:"hooks,omitempty"`
 	ID               string       `json:"id"`
 	Name             string       `json:"name"`
 	Enabled          bool         `json:"enabled"`

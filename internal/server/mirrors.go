@@ -138,6 +138,12 @@ func (s *Server) apiMirrorSave(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	hk, err := s.validateHooks(l, in.Hooks, in.DestAgent)
+	if err != nil {
+		httpErr(w, 400, "%v", err)
+		return
+	}
+	in.Hooks = hk
 	if old == nil {
 		in.ID, in.Created = rid(6), time.Now().Unix()
 	} else {

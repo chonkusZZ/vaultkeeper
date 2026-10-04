@@ -67,7 +67,7 @@ func (s *Server) agentPoll(w http.ResponseWriter, r *http.Request, a *store.Agen
 		x.Roles, x.Hostname, x.OS, x.Arch, x.Version, x.Restic = st.Roles, st.Hostname, st.OS, st.Arch, st.Version, st.ResticVersion
 		x.Advertise, x.CertPEM, x.DataDir, x.DiskTotal, x.DiskFree, x.Running = st.Advertise, st.CertPEM, st.DataDir, st.DiskTotal, st.DiskFree, st.Running
 		x.MirrorRoot, x.MirrorTotal, x.MirrorFree = st.MirrorRoot, st.MirrorTotal, st.MirrorFree
-		x.Listen, x.ConfigRev, x.AdvertiseSetting = st.Listen, st.ConfigRev, st.AdvertiseSetting
+		x.Listen, x.ConfigRev, x.AdvertiseSetting, x.AllowScripts = st.Listen, st.ConfigRev, st.AdvertiseSetting, st.AllowScripts
 		if x.Desired != nil && st.ConfigRev >= x.Desired.Rev {
 			x.Desired = nil // the agent confirmed it applied the change
 		}
@@ -155,9 +155,16 @@ func (s *Server) agentLog(w http.ResponseWriter, r *http.Request, a *store.Agent
 		httpErr(w, 400, "bad request")
 		return
 	}
+	// Wake and hook steps log into the run they belong to, so the run page tells the whole story.
+	logRun, logJob := run.ID, run.JobID
+	if run.Parent != "" {
+		if p, err := s.st.GetRun(run.Parent); err == nil {
+			logRun, logJob = p.ID, p.JobID
+		}
+	}
 	entries := make([]store.LogEntry, 0, len(in.Lines))
 	for _, l := range in.Lines {
-		entries = append(entries, store.LogEntry{TS: l.Time.UnixMilli(), Level: l.Level, RunID: run.ID, JobID: run.JobID, Source: a.Name, Message: l.Message})
+		entries = append(entries, store.LogEntry{TS: l.Time.UnixMilli(), Level: l.Level, RunID: logRun, JobID: logJob, Source: a.Name, Message: l.Message})
 	}
 	s.st.AddLogs(entries)
 	cancel := s.st.TouchRun(run.ID)
@@ -202,5 +209,6 @@ func (s *Server) failOrphans(a *store.Agent) {
 			}
 			s.notifyRun(r, job, cp)
 		}
+		s.maybePostHook(r)
 	}
 }

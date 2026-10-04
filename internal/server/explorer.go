@@ -78,6 +78,10 @@ func (s *Server) runSync(o enqueueOpts, timeout time.Duration) (*store.Run, erro
 		}
 		time.Sleep(200 * time.Millisecond)
 	}
+	if cur, err := s.st.GetRun(run.ID); err == nil && cur.WaitFor != "" {
+		_ = s.st.FinishRun(run.ID, proto.StatusFailed, "cancelled", nil)
+		return nil, fmt.Errorf("the backup target is still waking up; try again in a minute")
+	}
 	_ = s.st.RequestCancel(run.ID)
 	return nil, fmt.Errorf("the agent did not answer in time")
 }

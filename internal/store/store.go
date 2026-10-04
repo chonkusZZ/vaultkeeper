@@ -48,6 +48,8 @@ CREATE INDEX IF NOT EXISTS logs_ts ON logs(ts DESC);
 	if err == nil {
 		// Additive migration for databases created before explorer support.
 		_, _ = db.Exec(`ALTER TABLE runs ADD COLUMN params TEXT NOT NULL DEFAULT '{}'`)
+		_, _ = db.Exec(`ALTER TABLE runs ADD COLUMN parent TEXT NOT NULL DEFAULT ''`)
+		_, _ = db.Exec(`ALTER TABLE runs ADD COLUMN wait_for TEXT NOT NULL DEFAULT ''`)
 	}
 	return s, err
 }
@@ -134,16 +136,18 @@ type Run struct {
 	Cancel   bool           `json:"cancel"`
 	Hidden   bool           `json:"-"`
 	Params   proto.Explore  `json:"params"`
+	Parent   string         `json:"parent,omitempty"`   // wake/hook runs: the run they belong to
+	WaitFor  string         `json:"wait_for,omitempty"` // queued runs: id of the wake run that must finish first
 }
 
-const runCols = `id,kind,job_id,copy_id,agent_id,status,trigger,created,started,finished,activity,summary,message,cancel,hidden,params`
+const runCols = `id,kind,job_id,copy_id,agent_id,status,trigger,created,started,finished,activity,summary,message,cancel,hidden,params,parent,wait_for`
 
 func scanRun(sc interface{ Scan(...any) error }) (*Run, error) {
 	var r Run
 	var sum string
 	var cancel, hidden int
 	var params string
-	if err := sc.Scan(&r.ID, &r.Kind, &r.JobID, &r.CopyID, &r.AgentID, &r.Status, &r.Trigger, &r.Created, &r.Started, &r.Finished, &r.Activity, &sum, &r.Message, &cancel, &hidden, &params); err != nil {
+	if err := sc.Scan(&r.ID, &r.Kind, &r.JobID, &r.CopyID, &r.AgentID, &r.Status, &r.Trigger, &r.Created, &r.Started, &r.Finished, &r.Activity, &sum, &r.Message, &cancel, &hidden, &params, &r.Parent, &r.WaitFor); err != nil {
 		return nil, err
 	}
 	_ = json.Unmarshal([]byte(params), &r.Params)
@@ -156,8 +160,8 @@ func scanRun(sc interface{ Scan(...any) error }) (*Run, error) {
 
 func (s *Store) InsertRun(r *Run) error {
 	pb, _ := json.Marshal(r.Params)
-	_, err := s.DB.Exec(`INSERT INTO runs(id,kind,job_id,copy_id,agent_id,status,trigger,created,hidden,params) VALUES(?,?,?,?,?,?,?,?,?,?)`,
-		r.ID, r.Kind, r.JobID, r.CopyID, r.AgentID, r.Status, r.Trigger, r.Created, b2i(r.Hidden), string(pb))
+	_, err := s.DB.Exec(`INSERT INTO runs(id,kind,job_id,copy_id,agent_id,status,trigger,created,hidden,params,parent,wait_for) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
+		r.ID, r.Kind, r.JobID, r.CopyID, r.AgentID, r.Status, r.Trigger, r.Created, b2i(r.Hidden), string(pb), r.Parent, r.WaitFor)
 	return err
 }
 
@@ -224,7 +228,7 @@ func (s *Store) ActiveRuns() ([]*Run, error) {
 func (s *Store) ClaimRun(agentID string) (*Run, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	r, err := scanRun(s.DB.QueryRow(`SELECT `+runCols+` FROM runs q WHERE q.agent_id=? AND q.status='queued'
+	r, err := scanRun(s.DB.QueryRow(`SELECT `+runCols+` FROM runs q WHERE q.agent_id=? AND q.status='queued' AND q.wait_for=''
 	  AND NOT EXISTS (SELECT 1 FROM runs x WHERE x.status='running' AND x.job_id=q.job_id AND x.job_id<>''
 	    AND (x.kind IN ('backup','copy','prune','mirror','forget','purge') OR q.kind IN ('backup','copy','prune','mirror','forget','purge')))
 	  ORDER BY q.created LIMIT 1`, agentID))
@@ -257,6 +261,11 @@ func (s *Store) FinishRun(id, status, message string, summary map[string]any) er
 func (s *Store) DeleteRun(id string) {
 	_, _ = s.DB.Exec(`DELETE FROM logs WHERE run_id=?`, id)
 	_, _ = s.DB.Exec(`DELETE FROM runs WHERE id=?`, id)
+}
+
+// ReleaseWait lets a run that was waiting for its wake step start.
+func (s *Store) ReleaseWait(id string) {
+	_, _ = s.DB.Exec(`UPDATE runs SET wait_for='', activity=? WHERE id=? AND status='queued'`, time.Now().Unix(), id)
 }
 
 func (s *Store) RequestCancel(id string) error {

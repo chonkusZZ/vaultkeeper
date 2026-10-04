@@ -24,6 +24,11 @@ services:
     restart: unless-stopped
 
   # Source: back up whatever you mount read-only under /source.
+  #
+  # Waking a NAS / running post-job scripts from a container:
+  #  * scripts are off unless you opt in:      VK_ALLOW_SCRIPTS: "1"
+  #  * Wake-on-LAN broadcasts don't leave Docker's default bridge network, so for an agent that
+  #    sends wake-ups use the host network instead:   network_mode: host   (and drop any `ports:`)
   source:
     build: { context: ., target: agent }
     command: ["--name", "source", "--roles", "source"]

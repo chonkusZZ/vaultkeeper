@@ -449,6 +449,12 @@ func (s *Server) apiJobSave(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, 400, "test schedule: %v", err)
 		return
 	}
+	hk, err := s.validateHooks(l, in.Hooks, in.DestAgent)
+	if err != nil {
+		httpErr(w, 400, "%v", err)
+		return
+	}
+	in.Hooks = hk
 	if old == nil {
 		in.ID = rid(6)
 		in.Created = time.Now().Unix()
@@ -667,6 +673,12 @@ func (s *Server) apiCopySave(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, 400, "schedule: %v", err)
 		return
 	}
+	hk, err := s.validateHooks(l, in.Hooks, in.DestAgent)
+	if err != nil {
+		httpErr(w, 400, "%v", err)
+		return
+	}
+	in.Hooks = hk
 	if old == nil {
 		in.ID, in.Created = rid(6), time.Now().Unix()
 		in.RepoName = "copy-" + in.ID
@@ -792,6 +804,9 @@ func (s *Server) apiRunCancel(w http.ResponseWriter, r *http.Request) {
 	}
 	if run.Status == proto.StatusQueued {
 		_ = s.st.FinishRun(run.ID, proto.StatusFailed, "cancelled before start", nil)
+		if run.WaitFor != "" { // also stop the wake step that was working for it
+			_ = s.st.RequestCancel(run.WaitFor)
+		}
 	} else {
 		_ = s.st.RequestCancel(run.ID)
 	}

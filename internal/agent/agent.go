@@ -42,6 +42,8 @@ type Config struct {
 	Insecure  bool // skip TLS verification of the manager
 	// MirrorRoot is where destination agents keep raw mirrors (default <data-dir>/mirrors).
 	MirrorRoot string
+	// AllowScripts lets the manager run commands on this machine (wake commands and post-job scripts). Off by default.
+	AllowScripts bool
 }
 
 type state struct {
@@ -263,7 +265,7 @@ func (a *Agent) stats() proto.Stats {
 		Hostname: host, OS: runtime.GOOS, Arch: runtime.GOARCH, Version: Version,
 		ResticVersion: a.resticV, Roles: a.cfg.Roles, Name: a.cfg.Name,
 		Running: int(a.running.Load()), DataDir: a.cfg.DataDir,
-		Listen: a.cfg.Listen, ConfigRev: a.configRev, AdvertiseSetting: a.cfg.Advertise,
+		Listen: a.cfg.Listen, ConfigRev: a.configRev, AdvertiseSetting: a.cfg.Advertise, AllowScripts: a.cfg.AllowScripts,
 	}
 	s.DiskTotal, s.DiskFree = diskUsage(a.cfg.DataDir)
 	if a.cfg.has("dest") {
